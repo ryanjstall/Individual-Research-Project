@@ -1,0 +1,486 @@
+---
+title: 'Individual Research Project'
+author: "Ryan Stall"
+date: "3/28/2021"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+header-includes:
+- \renewcommand*\familydefault{\sfdefault} %% this picks a sans serif font
+- \usepackage[T1]{fontenc}
+---
+```{r setup, echo=F}
+knitr::opts_chunk$set(cache = T)
+```
+
+### Selecting packages
+
+```{r}
+library(sp)
+library(tigris)
+library(rgdal)
+library(sf)
+library(spatstat)
+library(lubridate)
+library(RColorBrewer)
+library(dplyr)
+library(leaflet)
+library(glue)
+library(scales)
+library(htmltools)
+library(tidyr)
+library(raster)
+library(spdep)
+library(spatialreg)
+```
+
+### Reading in and preparing COVID data
+```{r}
+mydata = read.csv("/Users/ryanjstall/Desktop/R Stuff/coviddata.csv", header=TRUE)
+covid = mydata %>% dplyr::select(state, tot_cases, tot_death)
+```
+
+### Reading in and preparing state population data
+
+```{r}
+mydata2 = read.csv("/Users/ryanjstall/Desktop/R Stuff/statedata.csv", header=TRUE)
+mydata2 = mydata2[-12,]
+mydata2$area = round(mydata2$Pop / mydata2$density)
+mydata2$state = state.abb[match(mydata2$State, state.name)]
+mydata2$state[35] = 'DC'
+states = mydata2 %>% dplyr::select(state, Pop, area, density)
+```
+
+### Merging two datasets and creating covid rate variables
+
+```{r}
+mydata3 = merge(covid, states, by = "state", no.dups = TRUE)
+mydata3$tot_cases = gsub(",","",mydata3$tot_cases)
+mydata3$tot_cases = as.integer(mydata3$tot_cases)
+mydata3$tot_death = gsub(",","",mydata3$tot_death)
+mydata3$tot_death = as.integer(mydata3$tot_death)
+mydata3$cases_per_person = mydata3$tot_cases / mydata3$Pop
+mydata3$deaths_per_person = mydata3$tot_death / mydata3$Pop
+mydata3$mortality_rate = mydata3$tot_death / mydata3$tot_cases
+```
+
+### Reading in and preparing vote data
+
+```{r}
+vote = read.csv("/Users/ryanjstall/Desktop/R Stuff/vote.csv", header=TRUE)
+vote = vote[1:51,]
+vote$rep_percent = as.numeric(sub("%","",vote$rep_percent))/100
+vote$rep_factor = 2*(vote$rep_percent) - 1
+vote$state = state.abb[match(vote$state, state.name)]
+vote$state[9] = 'DC'
+vote2 = vote %>% dplyr::select(state, rep_factor)
+mydata3 = merge(mydata3, vote2, by="state", no.dups = TRUE)
+```
+
+### Creating mask mandate variable
+
+```{r}
+mydata3$mask_mandate = c(0,1,0,0,1,1,1,1,1,0,0,1,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,1,0,0,1,1,1,1,1,1,0,1,1,1,0,0,0,0,1,1,1,1,1,1,0)
+```
+
+### Reading in and preparing demographic variables
+
+```{r}
+demographics = read.csv("/Users/ryanjstall/Desktop/R Stuff/state_demographics.csv", header=TRUE)
+demographics$state = state.abb[match(demographics$State, state.name)]
+demographics$state[9] = 'DC'
+demographics2 = demographics %>% dplyr::select(state, Age.Percent.65.and.Older, Age.Percent.Under.18.Years, Education.Bachelor.s.Degree.or.Higher, Miscellaneous.Percent.Female, Miscellaneous.Veterans)
+mydata3 = merge(mydata3, demographics2, by = "state", no.dups = TRUE)
+```
+
+### EDA and model building
+
+```{r}
+mydata4 = mydata3[-8,]
+mydata4$density = log(mydata4$density)
+mydata4$Age.Percent.Under.18.Years = log(mydata4$Age.Percent.Under.18.Years)
+mydata4$Miscellaneous.Percent.Female = exp(mydata4$Miscellaneous.Percent.Female)
+mydata4$Miscellaneous.Veterans = log(mydata4$Miscellaneous.Veterans)
+attach(mydata4)
+full.lm = lm(cases_per_person ~ density + rep_factor + mask_mandate + Age.Percent.65.and.Older + Age.Percent.Under.18.Years + Education.Bachelor.s.Degree.or.Higher + Miscellaneous.Percent.Female + Miscellaneous.Veterans)
+full.lm2 = lm(deaths_per_person ~ density + rep_factor + mask_mandate + Age.Percent.65.and.Older + Age.Percent.Under.18.Years + Education.Bachelor.s.Degree.or.Higher + Miscellaneous.Percent.Female + Miscellaneous.Veterans)
+full.lm3 = lm(mortality_rate ~ density + rep_factor + mask_mandate + Age.Percent.65.and.Older + Age.Percent.Under.18.Years + Education.Bachelor.s.Degree.or.Higher + Miscellaneous.Percent.Female + Miscellaneous.Veterans)
+summary(full.lm)
+lm1 = step(full.lm, direction = "both")
+summary(lm1)
+summary(full.lm2)
+lm2 = step(full.lm2, direction = "both")
+summary(lm2)
+summary(full.lm3)
+lm3 = step(full.lm3, direction = "both")
+summary(lm3)
+detach(mydata4)
+```
+
+We find that population density, voting republican, and having a high percentage of the population being under 18 years old are directly proportional to the percentage of the population that contracts COVID-19. Having a mask mandate in place and having a large number of veterans are inverse proportional to the percentage of the population that contracts COVID-19.
+
+
+We find that population density, and voting republican are directly proportional to the percentage of the population that dies from COVID-19.
+
+### Reading in shapefile data
+
+```{r}
+temp = states(cb = FALSE, resolution = "500k", year = NULL)
+temp$state = state.abb[match(temp$NAME, state.name)]
+temp$state[54] = 'DC'
+temp = temp[!is.na(temp$state), ]
+```
+
+### Combining shapefile and covid data
+
+```{r}
+mydata5 = merge(temp, mydata3, by = "state", no.dups = TRUE)
+finaldata = st_transform(mydata5, "+proj=longlat +datum=WGS84")
+finaldata$mask_mandate = factor(finaldata$mask_mandate, levels=c(0,1), labels=c("No", "Yes"))
+finaldata$cases_per_person = round(finaldata$cases_per_person, 5)
+finaldata$deaths_per_person = round(finaldata$deaths_per_person, 5)
+finaldata$mortality_rate = round(finaldata$mortality_rate, 5)
+```
+
+### Creating CAR models
+
+```{r}
+tester = as(mydata5, 'Spatial')
+nb = poly2nb(tester)
+fit.CAR = spautolm(cases_per_person ~ density + rep_factor + mask_mandate + Age.Percent.65.and.Older + Age.Percent.Under.18.Years + Education.Bachelor.s.Degree.or.Higher + Miscellaneous.Percent.Female + Miscellaneous.Veterans, data = tester, listw = nb2listw(nb, style = "B", zero.policy = TRUE), family = "CAR")
+summary(fit.CAR)
+fit.CAR2 = spautolm(deaths_per_person ~ density + rep_factor + mask_mandate + Age.Percent.65.and.Older + Age.Percent.Under.18.Years + Education.Bachelor.s.Degree.or.Higher + Miscellaneous.Percent.Female + Miscellaneous.Veterans, data = tester, listw = nb2listw(nb, style = "B", zero.policy = TRUE), family = "CAR")
+summary(fit.CAR2)
+fit.CAR3 = spautolm(mortality_rate ~ density + rep_factor + mask_mandate + Age.Percent.65.and.Older + Miscellaneous.Percent.Female, data = tester, listw = nb2listw(nb, style = "B", zero.policy = TRUE), family = "CAR")
+summary(fit.CAR3)
+```
+
+The CAR model suggests that voting republican and the female percentage of the population are statistically significant predictors for the percentage of the population in each state that contracts COVID-19.
+
+The CAR model suggests that the female percentage of the population is a statistically significant predictor for the percentage of the population in each state that died of COVID-19.
+
+The CAR model suggests that the female percentage of the population is a statistically significant predictor for the mortality rate of COVID-19 in each state.
+
+### Adding colors
+
+```{r}
+minmax = range(finaldata$cases_per_person, na.rm = TRUE)
+color1 = colorNumeric(palette = "Reds", domain=c(minmax[1], minmax[2]))
+minmax2 = range(finaldata$deaths_per_person, na.rm = TRUE)
+color2 = colorNumeric(palette = "Blues", domain=c(minmax2[1], minmax2[2]))
+minmax3 = range(finaldata$mortality_rate, na.rm = TRUE)
+color3 = colorNumeric(palette = "Greens", domain=c(minmax3[1], minmax3[2]))
+```
+
+### HTML Code for popup display
+
+```{r}
+popup1 = glue("<strong>{finaldata$NAME} </strong><br />
+                    Population: {scales::comma(finaldata$Pop)}<br />
+                    Population Density: {scales::comma(finaldata$density)}<br />
+                    Total cases: {scales::comma(finaldata$tot_cases)}<br />
+                    Cases per person: {finaldata$cases_per_person}<br />
+                    Mask mandate: {finaldata$mask_mandate}<br />
+                    Republican preference: {finaldata$rep_factor}<br />
+                    Percentage of population under 18: {finaldata$Age.Percent.Under.18.Years}<br />
+                    ")  %>%   
+  lapply(htmltools::HTML)
+popup2 = glue("<strong>{finaldata$NAME} </strong><br />
+                    Population: {scales::comma(finaldata$Pop)}<br />
+                    Population Density: {scales::comma(finaldata$density)}<br />
+                    Total deaths: {scales::comma(finaldata$tot_death)}<br />
+                    Deaths per person: {finaldata$deaths_per_person}<br />
+                    Mortality rate: {finaldata$mortality_rate}<br />
+                    Mask mandate: {finaldata$mask_mandate}<br />
+                    Republican preference: {finaldata$rep_factor}<br />
+                    Female percentage: {finaldata$Miscellaneous.Percent.Female}<br />
+                    ")  %>%   
+  lapply(htmltools::HTML)
+popup3 = glue("<strong>{finaldata$NAME} </strong><br />
+                    Population: {scales::comma(finaldata$Pop)}<br />
+                    Population Density: {scales::comma(finaldata$density)}<br />
+                    Total deaths: {scales::comma(finaldata$tot_death)}<br />
+                    Deaths per person: {finaldata$deaths_per_person}<br />
+                    Mortality rate: {finaldata$mortality_rate}<br />
+                    Mask mandate: {finaldata$mask_mandate}<br />
+                    Female percentage: {finaldata$Miscellaneous.Percent.Female}<br />
+                    ")  %>%   
+  lapply(htmltools::HTML)
+```
+
+### Building Cases Per Person Map
+
+```{r}
+leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(
+    data = finaldata,
+    fillColor = ~color1(cases_per_person),
+    label = popup1,
+    stroke = TRUE,
+    smoothFactor = 0.2,
+    fillOpacity = .4,
+    color = "#666",
+    weight = 1
+  )
+```
+
+### Building Deaths Per Person Map
+
+```{r}
+leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(
+    data = finaldata,
+    fillColor = ~color2(deaths_per_person),
+    label = popup2,
+    stroke = TRUE,
+    smoothFactor = 0.2,
+    fillOpacity = .4,
+    color = "#666",
+    weight = 1
+  )
+```
+
+### Building Mortality Rate Map
+
+```{r}
+leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(
+    data = finaldata,
+    fillColor = ~color3(mortality_rate),
+    label = popup3,
+    stroke = TRUE,
+    smoothFactor = 0.2,
+    fillOpacity = .4,
+    color = "#666",
+    weight = 1
+  )
+```
+
+### Reading in and preparing vaccine data
+
+```{r}
+vaccine = read.csv("/Users/ryanjstall/Desktop/R Stuff/vaccine.csv", header=TRUE)
+vaccine = vaccine[vaccine$Day == "2021-04-04",]
+vaccine$state = state.abb[match(vaccine$Entity, state.name)]
+vaccine$state[12] = 'DC'
+vaccine$state[41] = 'NY'
+vaccine = vaccine[!is.na(vaccine$state), c("state", "total_vaccinations")]
+mydata6 = merge(vaccine, mydata3, by = "state", no.dups = TRUE)
+mydata6 = mydata6 %>% dplyr::select(state, total_vaccinations, Pop)
+mydata6$vaccination_percentage = mydata6$total_vaccinations / mydata6$Pop
+```
+
+### Reading in and preparing 2021 data
+
+```{r}
+mydata7 = read.csv("/Users/ryanjstall/Desktop/R Stuff/coviddata2.csv", header=TRUE)
+covid2 = mydata7 %>% dplyr::select(state, tot_cases, tot_death)
+colnames(covid2) = c("state", "cases", "deaths")
+covid2021 = merge(covid, covid2, by="state", no.dups = TRUE)
+covid2021$tot_cases = gsub(",","",covid2021$tot_cases)
+covid2021$tot_cases = as.integer(covid2021$tot_cases)
+covid2021$tot_death = gsub(",","",covid2021$tot_death)
+covid2021$tot_death = as.integer(covid2021$tot_death)
+covid2021$cases = gsub(",","",covid2021$cases)
+covid2021$cases = as.integer(covid2021$cases)
+covid2021$deaths = gsub(",","",covid2021$deaths)
+covid2021$deaths = as.integer(covid2021$deaths)
+covid2021$cases_in_2021 = covid2021$tot_cases - covid2021$cases
+covid2021$deaths_in_2021 = covid2021$tot_death - covid2021$deaths
+covid2021 = covid2021 %>% dplyr::select(state, cases_in_2021, deaths_in_2021)
+```
+
+### Merging vaccination, case and demographics data and creating mask mandate variable
+
+```{r}
+mydata7 = merge(covid2021, mydata6, by="state", no.dups = TRUE)
+mydata8 = merge(mydata7, demographics2, by = "state", no.dups = TRUE)
+mydata8$area = mydata2$area
+mydata8$mask_mandate = mydata3$mask_mandate
+mydata8$rep_factor = mydata3$rep_factor
+mydata8$density = mydata3$density
+```
+
+### Creating rate variables
+
+```{r}
+mydata8$cases_per_person = mydata8$cases_in_2021 / mydata8$Pop
+mydata8$deaths_per_person = mydata8$deaths_in_2021 / mydata8$Pop
+mydata8$mortality_rate = mydata8$deaths_in_2021 / mydata8$cases_in_2021
+```
+
+### EDA and model building
+
+```{r}
+attach(mydata8)
+lm4 = lm(cases_per_person ~ vaccination_percentage + mask_mandate)
+lm5 = lm(deaths_per_person ~ vaccination_percentage + mask_mandate)
+lm6 = lm(mortality_rate ~ vaccination_percentage + mask_mandate)
+summary(lm4)
+summary(lm5)
+summary(lm6)
+detach(mydata8)
+```
+
+### Combining shapefile and covid data
+
+```{r}
+mydata9 = merge(temp, mydata8, by = "state", no.dups = TRUE)
+finaldata2 = st_transform(mydata9, "+proj=longlat +datum=WGS84")
+finaldata2$mask_mandate = factor(finaldata2$mask_mandate, levels=c(0,1), labels=c("No", "Yes"))
+finaldata2$cases_per_person = round(finaldata2$cases_per_person, 5)
+finaldata2$deaths_per_person = round(finaldata2$deaths_per_person, 5)
+finaldata2$mortality_rate = round(finaldata2$mortality_rate, 5)
+finaldata2$vaccination_percentage = round(finaldata2$vaccination_percentage, 5)
+```
+
+### Creating CAR models
+
+```{r}
+tester2 = as(mydata9, 'Spatial')
+nb2 = poly2nb(tester2)
+fit.CAR4 = spautolm(cases_per_person ~ mask_mandate + vaccination_percentage, data = tester2, listw = nb2listw(nb2, style = "B", zero.policy = TRUE), family = "CAR")
+summary(fit.CAR4)
+fit.CAR5 = spautolm(deaths_per_person ~ mask_mandate + vaccination_percentage, data = tester2, listw = nb2listw(nb2, style = "B", zero.policy = TRUE), family = "CAR")
+summary(fit.CAR5)
+fit.CAR6 = spautolm(mortality_rate ~ mask_mandate + vaccination_percentage, data = tester2, listw = nb2listw(nb2, style = "B", zero.policy = TRUE), family = "CAR")
+summary(fit.CAR6)
+```
+
+### Adding colors
+
+```{r}
+minmax4 = range(finaldata2$cases_per_person, na.rm = TRUE)
+color4 = colorNumeric(palette = "Reds", domain=c(minmax4[1], minmax4[2]))
+minmax5 = range(finaldata2$deaths_per_person, na.rm = TRUE)
+color5 = colorNumeric(palette = "Blues", domain=c(minmax5[1], minmax5[2]))
+minmax6 = range(finaldata2$mortality_rate, na.rm = TRUE)
+color6 = colorNumeric(palette = "Greens", domain=c(minmax6[1], minmax6[2]))
+minmax7 = range(finaldata2$vaccination_percentage, na.rm = TRUE)
+color7 = colorNumeric(palette = "Purples", domain=c(minmax7[1], minmax7[2]))
+```
+
+### HTML Code for popup display
+
+```{r}
+popup4 = glue("<strong>{finaldata2$NAME} </strong><br />
+                    Population: {scales::comma(finaldata2$Pop)}<br />
+                    Population Density: {scales::comma(finaldata2$density)}<br />
+                    Total Cases: {scales::comma(finaldata2$cases_in_2021)}<br />
+                    Cases Per Person: {finaldata2$cases_per_person}<br />
+                    Total Vaccinations: {scales::comma(finaldata2$total_vaccinations)}<br />
+                    Vaccination Percentage: {finaldata2$vaccination_percentage}<br />
+                    Mask Mandate: {finaldata2$mask_mandate}<br />
+                    ")  %>%   
+  lapply(htmltools::HTML)
+popup5 = glue("<strong>{finaldata2$NAME} </strong><br />
+                    Population: {scales::comma(finaldata2$Pop)}<br />
+                    Population Density: {scales::comma(finaldata2$density)}<br />
+                    Total Deaths: {scales::comma(finaldata2$deaths_in_2021)}<br />
+                    Deaths Per Person: {finaldata2$deaths_per_person}<br />
+                    Mortality Rate: {finaldata2$mortality_rate} <br />
+                    Total Vaccinations: {scales::comma(finaldata2$total_vaccinations)}<br />
+                    Vaccination Percentage: {finaldata2$vaccination_percentage}<br />
+                    Mask Mandate: {finaldata2$mask_mandate}<br />
+                    ")  %>%   
+  lapply(htmltools::HTML)
+popup6 = glue("<strong>{finaldata2$NAME} </strong><br />
+                    Population: {scales::comma(finaldata2$Pop)}<br />
+                    Population Density: {scales::comma(finaldata2$density)}<br />
+                    Total Deaths: {scales::comma(finaldata2$deaths_in_2021)}<br />
+                    Deaths Per Person: {finaldata2$deaths_per_person}<br />
+                    Mortality Rate: {finaldata2$mortality_rate} <br />
+                    Total Vaccinations: {scales::comma(finaldata2$total_vaccinations)}<br />
+                    Vaccination Percentage: {finaldata2$vaccination_percentage}<br />
+                    Mask Mandate: {finaldata2$mask_mandate}<br />
+                    ")  %>%   
+  lapply(htmltools::HTML)
+popup7 = glue("<strong>{finaldata2$NAME} </strong><br />
+                    Population: {scales::comma(finaldata2$Pop)}<br />
+                    Population Density: {scales::comma(finaldata2$density)}<br />
+                    Total Cases: {scales::comma(finaldata2$cases_in_2021)}<br />
+                    Cases Per Person: {finaldata2$cases_per_person}<br />
+                    Total Deaths: {scales::comma(finaldata2$deaths_in_2021)}<br />
+                    Deaths Per Person: {finaldata2$deaths_per_person}<br />
+                    Mortality Rate: {finaldata2$mortality_rate} <br />
+                    Total Vaccinations: {scales::comma(finaldata2$total_vaccinations)}<br />
+                    Vaccination Percentage: {finaldata2$vaccination_percentage}<br />
+                    Mask Mandate: {finaldata2$mask_mandate}<br />
+                    ")  %>%   
+  lapply(htmltools::HTML)
+```
+
+### Building Cases Per Person Map
+
+```{r}
+leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(
+    data = finaldata2,
+    fillColor = ~color4(cases_per_person),
+    label = popup4,
+    stroke = TRUE,
+    smoothFactor = 0.2,
+    fillOpacity = .4,
+    color = "#666",
+    weight = 1
+  )
+```
+
+### Building Deaths Per Person Map
+
+```{r}
+leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(
+    data = finaldata2,
+    fillColor = ~color5(deaths_per_person),
+    label = popup5,
+    stroke = TRUE,
+    smoothFactor = 0.2,
+    fillOpacity = .4,
+    color = "#666",
+    weight = 1
+  )
+```
+
+### Building Mortality Rate Map
+
+```{r}
+leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(
+    data = finaldata2,
+    fillColor = ~color6(mortality_rate),
+    label = popup6,
+    stroke = TRUE,
+    smoothFactor = 0.2,
+    fillOpacity = .4,
+    color = "#666",
+    weight = 1
+  )
+```
+
+### Building Vaccination Rate Map
+
+```{r}
+leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(
+    data = finaldata2,
+    fillColor = ~color7(vaccination_percentage),
+    label = popup7,
+    stroke = TRUE,
+    smoothFactor = 0.2,
+    fillOpacity = .4,
+    color = "#666",
+    weight = 1
+  )
+```
+
+I enjoy building maps with leaflet because it is relatively easy to use as R packages go and it is pretty entertaining being able to highlight any of the polygons on the map and see the popup with all of that state's relevant information come up. Drawbacks ahd limitations to leaflet include that it can be laggy at times, takes really long to render and because it produces HTML output, it can only be rendered to an HTML document. So if you are a fan of PDF's, this might not be the best package for you.
